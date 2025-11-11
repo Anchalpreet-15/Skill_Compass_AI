@@ -7,6 +7,7 @@ import logging
 from app.text_parser import ResumeParser
 from app.skills_extractor import SkillsExtractor
 from app.market_analyzer import MarketAnalyzer
+from app.roadmap_generator import RoadmapGenerator
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,10 +29,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize extractors and analyzer
+# Initialize extractors, analyzer, and roadmap generator
 parser = ResumeParser()
 extractor = SkillsExtractor()
 analyzer = MarketAnalyzer()
+roadmap_gen = RoadmapGenerator()
 
 # ============================================
 # RESPONSE MODELS
@@ -79,6 +81,11 @@ class SkillRanking(BaseModel):
 class RankedSkillsResponse(BaseModel):
     ranked_skills: List[SkillRanking]
     count: int
+
+class RoadmapRequest(BaseModel):
+    target_skills: List[str]
+    current_skills: List[str]
+    hours_per_week: Optional[int] = 15
 
 # ============================================
 # ROUTES
@@ -231,3 +238,111 @@ async def analyze_resume_full(
     except Exception as e:
         logger.error(f"Error in full analysis: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/generate-roadmap")
+async def generate_roadmap(request: RoadmapRequest):
+    """
+    Generate personalized learning roadmap
+    """
+    try:
+        roadmap = roadmap_gen.generate_roadmap(
+            target_skills=request.target_skills,
+            current_skills=request.current_skills,
+            hours_per_week=request.hours_per_week
+        )
+        return roadmap
+    except Exception as e:
+        logger.error(f"Error generating roadmap: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/analyze-resume-with-roadmap")
+async def analyze_resume_with_roadmap(
+    file: UploadFile = File(...),
+    target_role: str = "Data Scientist",
+    hours_per_week: int = 15
+):
+    """
+    Complete analysis: Extract skills + Compare with role + Generate roadmap
+    This is the main endpoint that combines everything!
+    """
+    try:
+        # Extract skills from resume
+        file_content = await file.read()
+        resume_text = parser.extract_text(file_content, file.filename)
+        skills_data = extractor.extract_skills(resume_text)
+        
+        user_skills = skills_data["all_skills"]
+        
+        # Rank skills by market priority
+        ranked_skills = analyzer.rank_skills(user_skills)
+        
+        # Role comparison
+        role_comparison = analyzer.compare_with_role(user_skills, target_role)
+        
+        # Generate roadmap for missing skills
+        missing_skills = role_comparison.get("missing_required_skills", [])
+        
+        roadmap = None
+        if missing_skills:
+            roadmap = roadmap_gen.generate_roadmap(
+                target_skills=missing_skills,
+                current_skills=user_skills,
+                hours_per_week=hours_per_week
+            )
+        
+        return {
+            "extracted_skills": skills_data,
+            "market_analysis": {
+                "ranked_skills": ranked_skills,
+                "top_skills": ranked_skills[:5]
+            },
+            "role_comparison": role_comparison,
+            "learning_roadmap": roadmap,
+            "summary": {
+                "current_skill_count": len(user_skills),
+                "required_skill_count": role_comparison.get("total_required", 0),
+                "readiness_percentage": role_comparison.get("readiness_percentage", 0),
+                "skills_to_learn": len(missing_skills),
+                "estimated_weeks": roadmap.get("total_weeks", 0) if roadmap else 0,
+                "estimated_hours": roadmap.get("total_hours", 0) if roadmap else 0
+            }
+        }
+    
+    except Exception as e:
+        logger.error(f"Error in complete analysis: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+from time import time
+
+# Add performance tracking middleware
+@app.middleware("http")
+async def add_process_time_header(request, call_next):
+    start_time = time()
+    response = await call_next(request)
+    process_time = time() - start_time
+    response.headers["X-Process-Time"] = str(round(process_time, 3))
+    logger.info(f"Request to {request.url.path} took {process_time:.3f}s")
+    return response
+
+# Add a new endpoint for performance insights
+@app.get("/api/stats")
+async def get_api_stats():
+    """Get API statistics and capabilities"""
+    return {
+        "total_endpoints": 10,
+        "skills_tracked": len(analyzer.market_data),
+        "job_roles_available": len(analyzer.job_roles),
+        "skill_graph_nodes": len(roadmap_gen.skill_graph),
+        "learning_resources": len(roadmap_gen.resources),
+        "market_insights": analyzer.get_market_insights(),
+        "api_version": "1.0.0",
+        "features": [
+            "Resume skill extraction",
+            "Market demand analysis",
+            "Role comparison",
+            "Learning roadmap generation",
+            "Prerequisite resolution",
+            "Resource recommendations",
+            "Career advice",
+            "Progress tracking"
+        ]
+    }

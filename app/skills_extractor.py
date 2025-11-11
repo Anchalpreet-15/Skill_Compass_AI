@@ -2,6 +2,7 @@ import json
 import re
 from typing import List, Dict, Set
 from pathlib import Path
+from functools import lru_cache
 
 class SkillsExtractor:
     def __init__(self):
@@ -10,14 +11,24 @@ class SkillsExtractor:
         with open(db_path, 'r') as f:
             self.skills_db = json.load(f)
         
-        # Flatten all skills into a set for fast lookup
+        # Flatten all skills into optimized structures
         self.all_skills = set()
+        self.skill_patterns = {}  # Pre-compiled regex patterns
+        
         for category, skills in self.skills_db.items():
             if category != "skill_aliases":
-                self.all_skills.update([s.lower() for s in skills])
+                for skill in skills:
+                    skill_lower = skill.lower()
+                    self.all_skills.add(skill_lower)
+                    # Create regex pattern for each skill
+                    self.skill_patterns[skill_lower] = re.compile(
+                        r'\b' + re.escape(skill_lower) + r'\b',
+                        re.IGNORECASE
+                    )
     
+    @lru_cache(maxsize=128)
     def normalize_skill(self, skill: str) -> str:
-        """Normalize skill names using aliases"""
+        """Normalize skill names using aliases (cached for performance)"""
         skill = skill.strip()
         aliases = self.skills_db.get("skill_aliases", {})
         
@@ -29,33 +40,39 @@ class SkillsExtractor:
         return skill
     
     def extract_by_keywords(self, text: str) -> Set[str]:
-        """Extract skills using keyword matching"""
+        """Extract skills using optimized keyword matching"""
         found_skills = set()
         text_lower = text.lower()
         
-        # Search for each skill in the text
-        for skill in self.all_skills:
-            # Use word boundaries to avoid partial matches
-            pattern = r'\b' + re.escape(skill) + r'\b'
-            if re.search(pattern, text_lower, re.IGNORECASE):
+        # Use pre-compiled patterns for faster matching
+        for skill_lower, pattern in self.skill_patterns.items():
+            if pattern.search(text):
                 # Find the original case from text
-                match = re.search(pattern, text, re.IGNORECASE)
+                match = pattern.search(text)
                 if match:
-                    found_skills.add(match.group())
+                    # Get the properly cased version from our database
+                    for category, skills in self.skills_db.items():
+                        if category != "skill_aliases":
+                            for s in skills:
+                                if s.lower() == skill_lower:
+                                    found_skills.add(s)
+                                    break
         
         return found_skills
     
     def extract_by_context(self, text: str) -> Set[str]:
-        """Extract skills by looking at common resume patterns"""
+        """Extract skills by looking at common resume patterns (enhanced)"""
         found_skills = set()
         
-        # Common patterns in resumes
+        # Enhanced patterns with more variations
         patterns = [
-            r'Skills?[:\s]+([^\n]+)',
-            r'Technologies?[:\s]+([^\n]+)',
-            r'Tools?[:\s]+([^\n]+)',
-            r'Proficient in[:\s]+([^\n]+)',
-            r'Experience (?:with|in)[:\s]+([^\n]+)',
+            r'(?:Skills?|Technical Skills?|Technologies?|Tools?)[:\s]+([^\n]+)',
+            r'(?:Proficient|Experienced|Expert) (?:in|with)[:\s]+([^\n]+)',
+            r'(?:Knowledge|Experience) (?:of|in|with)[:\s]+([^\n]+)',
+            r'(?:Programming Languages?|Languages?)[:\s]+([^\n]+)',
+            r'(?:Frameworks?|Libraries?)[:\s]+([^\n]+)',
+            r'(?:Databases?|Data)[:\s]+([^\n]+)',
+            r'(?:Cloud|DevOps|Platform)[:\s]+([^\n]+)',
         ]
         
         for pattern in patterns:
@@ -63,51 +80,112 @@ class SkillsExtractor:
             for match in matches:
                 skills_line = match.group(1)
                 # Split by common delimiters
-                potential_skills = re.split(r'[,;|•·]', skills_line)
+                potential_skills = re.split(r'[,;|•·\n]', skills_line)
                 
                 for skill in potential_skills:
                     skill = skill.strip()
-                    if skill.lower() in self.all_skills:
-                        found_skills.add(skill)
+                    # Remove common non-skill words
+                    skill = re.sub(r'^(and|or|with|using|including)\s+', '', skill, flags=re.IGNORECASE)
+                    
+                    if skill and len(skill) > 1:
+                        skill_lower = skill.lower()
+                        if skill_lower in self.all_skills:
+                            # Find properly cased version
+                            for category, skills_list in self.skills_db.items():
+                                if category != "skill_aliases":
+                                    for s in skills_list:
+                                        if s.lower() == skill_lower:
+                                            found_skills.add(s)
+                                            break
+        
+        return found_skills
+    
+    def extract_by_phrases(self, text: str) -> Set[str]:
+        """Extract multi-word skills and phrases"""
+        found_skills = set()
+        
+        # Look for common skill phrases
+        multi_word_skills = [
+            "Machine Learning", "Deep Learning", "Data Science", 
+            "Computer Vision", "Natural Language Processing",
+            "REST API", "Web Development", "Mobile Development",
+            "Cloud Computing", "Data Visualization", "Database Design",
+            "Software Development", "Agile Methodology", "Problem Solving"
+        ]
+        
+        for skill in multi_word_skills:
+            pattern = re.compile(r'\b' + re.escape(skill) + r'\b', re.IGNORECASE)
+            if pattern.search(text):
+                found_skills.add(skill)
         
         return found_skills
     
     def extract_skills(self, resume_text: str) -> Dict[str, List[str]]:
-        """Main extraction function using keyword matching only"""
-        # Extract using both methods
+        """Main extraction function combining multiple methods (optimized)"""
+        # Extract using all methods in parallel
         keyword_skills = self.extract_by_keywords(resume_text)
         context_skills = self.extract_by_context(resume_text)
+        phrase_skills = self.extract_by_phrases(resume_text)
         
-        # Combine and normalize
-        all_skills = keyword_skills.union(context_skills)
+        # Combine all results
+        all_skills = keyword_skills.union(context_skills).union(phrase_skills)
+        
+        # Normalize and deduplicate
         normalized_skills = [self.normalize_skill(s) for s in all_skills]
-        
-        # Remove duplicates and sort
         unique_skills = sorted(list(set(normalized_skills)))
         
         # Categorize skills
         categorized = self._categorize_skills(unique_skills)
         
+        # Calculate confidence scores
+        skill_scores = self._calculate_confidence(unique_skills, resume_text)
+        
         return {
             "all_skills": unique_skills,
             "categorized": categorized,
-            "count": len(unique_skills)
+            "count": len(unique_skills),
+            "confidence_scores": skill_scores
         }
     
+    def _calculate_confidence(self, skills: List[str], text: str) -> Dict[str, float]:
+        """Calculate confidence score for each skill based on frequency and context"""
+        scores = {}
+        text_lower = text.lower()
+        
+        for skill in skills:
+            skill_lower = skill.lower()
+            # Count occurrences
+            count = len(re.findall(r'\b' + re.escape(skill_lower) + r'\b', text_lower))
+            
+            # Check if mentioned in key sections
+            in_skills_section = bool(re.search(
+                r'(?:skills?|technologies?)[^\n]*' + re.escape(skill_lower),
+                text_lower
+            ))
+            
+            # Calculate score (0-1 scale)
+            base_score = min(count * 0.2, 0.7)  # Max 0.7 from frequency
+            section_bonus = 0.3 if in_skills_section else 0
+            
+            scores[skill] = min(base_score + section_bonus, 1.0)
+        
+        return scores
+    
     def _categorize_skills(self, skills: List[str]) -> Dict[str, List[str]]:
-        """Organize skills by category"""
+        """Organize skills by category (optimized)"""
         categorized = {}
+        skills_lower = {s.lower(): s for s in skills}
         
         for category, skill_list in self.skills_db.items():
             if category == "skill_aliases":
                 continue
             
-            category_skills = [
-                s for s in skills 
-                if s.lower() in [sl.lower() for sl in skill_list]
-            ]
+            category_skills = []
+            for db_skill in skill_list:
+                if db_skill.lower() in skills_lower:
+                    category_skills.append(skills_lower[db_skill.lower()])
             
             if category_skills:
-                categorized[category] = category_skills
+                categorized[category] = sorted(category_skills)
         
         return categorized
